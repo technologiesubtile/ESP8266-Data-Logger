@@ -2,39 +2,37 @@
 // by Heinrich Diesinger
 
 
-#include "Arduino.h"
-#include "LittleFS.h"
-#include "Wire.h"
+#include "LittleFS.h" // LittleFS allows using part of the flash memory as a file system
+#include "Wire.h" // I2C support, here for the realtime clock module
 #define DS3231_I2C_ADDRESS 0x68
 
 // variables for caching data:
 const long lcachesize = 1025; // size of locally defined cache in readall(), readlast()
-                              //put here a fraction of the block size + 1 for the termiating zero
-const long gcachesize = 8193; // size of globally defined write cache used by loadcache(), cachedata(char userdata[180]), commitcache()                            
-char gcache[gcachesize]; // globally defined cache; in the function it must be locally defined otherwise 
-//it crashes for whatsoever reason
+                              //put here a kB + 1 for the terminating zero
+const long gcachesize = 8193; // size of globally defined write cache used by loadcache(), cachedata(char userdata[180]), commitcache()
+                              // we put 8 kB +1 for the terminating zero                            
+char gcache[gcachesize]; // globally defined cache
 
-// variables for the serial interrupt handler:
+// variables for the serial input handler:
 const byte numchars = 200;
 char inputcharray[numchars];
 //char *inputccptr = inputcharray; // LoRa input
 char message[numchars];  // all input be it LoRa or local
 char *messptr = message;
 boolean newdata = false;  // whether the reception is complete
-int ndx; // this is used both in LoRa and serial reception, seems to work
-//char receivedchars[numchars]; //serial data input
-//char *rccptr = receivedchars;
-long freespace = gcachesize;
-unsigned long lastchar;
-char rc;
-char stringbuf[20];
+int ndx; // counter used in serial reception
+long freespace = gcachesize; // measures how much chars are left in the cache
+unsigned long lastchar; // timer when last character was received by serial
+char rc; // eceived character
+char stringbuf[20]; // diverse stuff, used for concatenating the time stamp
 char logfilename[20] = "/log.txt";
 
 // variables for test routine
-boolean wrap = false;
-unsigned long lastentry;
-char userdata[180];
-boolean logging = false; // for standalone operation without command prompt, default to true to start logging on start up
+boolean wrap = false; // flag for cache overflow, set when part of a log entry must be written to the next cache
+unsigned long lastentry; // timer when last log entry was created
+char userdata[180]; // the char array from which the user creates a log entry ba calling cachedata(userdata)
+boolean logging = false; // whether auto logging is on
+                          //for standalone operation without command prompt, default to true to start logging on start up
 
 
 // Convert normal decimal to binary coded decimal numbers
@@ -183,7 +181,7 @@ void getTime()
 // put here a conversion to print it into a string
 // formatter "%02u" see https://www.tutorialspoint.com/c_standard_library/c_function_sprintf.htm
 // char stringbuf[20]; goes globally
-char* buf2 = stringbuf; // stays declared here and resets the pointer
+char* buf2 = stringbuf; // pointer to it stays declared here, resets the pointer when called
   // char* endofbuf = stringbuf + sizeof(stringbuf);
     /* i use 5 here since we are going to add at most 
        3 chars, need a space for the end '\n' and need
@@ -233,7 +231,7 @@ byte parse_char_dec(char c)
 
 // from hex address converter in mifare card reader and recycled in mqtt address header protocol
 byte twodecconvert(char twodecimal[]) {
-  // convert two digit decimal charray into a byte
+  // convert two digit decimal charray into a byte (in other words, 0 to 99)
   if (strlen(twodecimal) == 2)
   { // convert the two hex characters into integers from 0 to 15, 16 if not a hex symbol
     byte upperhalfbyte = parse_char_dec(twodecimal[0]);
@@ -256,6 +254,8 @@ byte twodecconvert(char twodecimal[]) {
 
 
 void settime() {
+  // function i wrote myself to set the clock from th ecommand prompt by calling typing settime dd/mm/yy d hh:mm:ss
+  // uses a lot of strtok (string token) to decompose the argument
   byte second, minute, hour, dayOfWeek, dayOfMonth, month, year;
   if (strstr(message, "settime ")) {
     char *strtokIndx = message + 8; // seems to work, in this context message means address of message
@@ -408,7 +408,8 @@ Serial.println("No argument");
 
 void readall() {
 // from martinayotte
-// outputs the entire file with the given path, uses read cache
+// outputs the entire file with the given path, kB by kB, uses read cache; attention to the delay, it avoids 
+// UART overflow, probably a 1 kB fifo buffer
 // https://www.esp8266.com/viewtopic.php?f=32&t=4570
  if (strstr(message, "readall ")) {
     char *strtokIndx = message + 8; // seems to work, in this context message means address of message
@@ -452,7 +453,7 @@ Serial.println("No argument");
 
 
 void readlast() {
-// reads up to 1 cachesize into cache, if file is bigger, 1 cachesize, if smaller, filesize  
+// reads up to 1 lcachesize (aka kB) into cache, if file is bigger, 1 lcachesize, if smaller, filesize  
  if (strstr(message, "readlast ")) {
     char *strtokIndx = message + 9; // seems to work, in this context message means address of message
     if (strlen(strtokIndx) <= 20) {
@@ -499,7 +500,6 @@ Serial.println("No argument");
 void readkbn() {
  char readfilename[20];
  long kbn;
- // reads up to 
 // reads up to 1 lcachesize from cursor position (in lcachesize) into cache, if remainder of file is bigger, 1 lcachesize, if smaller, remainder  
  if (strstr(message, "readkbn ")) {
     char *strtokIndx = message + 8; // seems to work, in this context message means address of message
@@ -693,7 +693,7 @@ void readcache() {
 void loggingon() {
   // turns on auto logging
 lastentry = millis(); // reset timer so it doesnt show a huge time lapse on the first entry of the test routine 
-cachedata("logging started");
+cachedata("logging started"); // also leave a log entry to keep track of what time auto logging was switched on
 logging = true;
 Serial.println();
 Serial.println("Logging enabled");
@@ -704,7 +704,7 @@ Serial.println("Logging enabled");
 void loggingoff() {
  // turns off auto logging
 logging = false;
-cachedata("logging stopped");
+cachedata("logging stopped"); // also leave a log entry to keep track of what time auto logging was switched ff
 Serial.println();
 Serial.println("Logging disabled");
 }
@@ -820,25 +820,25 @@ helpscreen();
         Serial.println("fail.");
     }
 
-fsinfo();
+fsinfo(); // show file system info
 
-displayTime();
+displayTime(); // show current time
 
 Serial.println();
 Serial.print("Current log file is: "); Serial.println(logfilename);
 
-loadcache();
-lastentry = millis();
+loadcache(); // reset the cache
+lastentry = millis(); // reset the timer of last log entry
 
-pinMode(D4, OUTPUT); //gpio 2, one of the mode determining pins at startup
-// turn off LED
+pinMode(D4, OUTPUT); //gpio 2, one of the mode determining pins at startup, but also the one to which the integrated LED is connected
+// configure it as output to be able to blink the blue LED, but turn it off for the moment
 digitalWrite(D4, HIGH); //inverse logic, off at high
 
-// configure pins for the rocker switch that is open, or ties reset to ground, or ties an input to ground to shutdown
+// configure pins for the pushbutton that is normally open and ties D5 to Gnd if pressed
 pinMode(D5, INPUT_PULLUP); // gpio14, pullup, this input causes a shutdown if set low
 pinMode(D0, OUTPUT); // gpio16
-digitalWrite(D0, LOW); // create an artificial Gnd for the pushbutton across D0-D5 
-
+digitalWrite(D0, LOW); // create an artificial Gnd for the pushbutton, because this pin is the neighbor of D5 and Gnd is already used to
+// power the real time clock module
 } // end setup
 
 
@@ -881,16 +881,21 @@ void loop()
  }
 
 
- // here the test routine
+ // here the test routine, a stupid program that creates a log entry every 2 seconds and measures if the previous log entry
+ // was really created 2 seconds ago; with this we will be able to see if execution of some functions, in particular the flash
+ // writing that occurs at full cache memory, take excessively long;
+ // this is the part that the user can later replace by his/her own program that reads sensor data every interval and
+ // creates a log entry from it;
+ 
 if (logging) {
   if (millis() - lastentry > 2000) {
   
-  // toggle LED so it blinks 2s on 2s off
+  // toggle LED so it blinks slowly, 2s on 2s off
   if (digitalRead(D4)) {
   digitalWrite(D4, LOW);} else {
      digitalWrite(D4, HIGH);
     } 
-   dtostrf((millis() - lastentry), 0, 0, userdata); // measure the time really elapsed since last log entry
+   dtostrf((millis() - lastentry), 0, 0, userdata); // measure the time really elapsed since last log entry and convert to char array
    // if flash writing takes long or the user enters commands that take time, it will show in the log as >> 2000
    strcat(userdata, " ms delay since last entry");
    if (wrap) {
@@ -907,7 +912,7 @@ else {
 
 
 
-// hardware shutdown with switch, check if switch pressed
+// hardware shutdown with switch, check if switch pressed and if so, shut down the data logger
   if (!digitalRead(D5)) {
     cachedata("shutdown by hardware switch");
      controlledshutdown();
